@@ -11,7 +11,7 @@ use crate::session::{
 };
 use goose_providers::errors::ProviderError;
 
-pub(crate) const DEVELOPER_EXTENSION_REQUIRED_MESSAGE: &str = "**Goose Doctor**\n\n\
+pub(crate) const DEVELOPER_EXTENSION_REQUIRED_MESSAGE: &str = "**WinAgent Doctor**\n\n\
 `/doctor` requires the Developer extension, but it is disabled for this session.\n\n\
 Enable it for this session and run `/doctor` again:\n\
 - CLI: `/builtin developer`\n\
@@ -55,11 +55,20 @@ pub async fn run(agent: &crate::agents::Agent, session_id: &str) -> anyhow::Resu
         }
     }
 
-    prompt.push_str(
-        "\nUse your tools to investigate what might be wrong. \
-         Check if common developer tools are available (git, etc.) \
-         and report what you find.",
-    );
+    if cfg!(windows) {
+        prompt.push_str(
+            "\nUse your tools to investigate what might be wrong on this Windows system. \
+             Check PowerShell (pwsh / powershell), Git for Windows, and common development \
+             toolchains (.NET SDK, MSBuild/Visual Studio, Python, Rust/Cargo, Android ADB) \
+             and report what you find.",
+        );
+    } else {
+        prompt.push_str(
+            "\nUse your tools to investigate what might be wrong. \
+             Check if common developer tools are available (git, etc.) \
+             and report what you find.",
+        );
+    }
 
     Ok(Message::user().with_text(prompt))
 }

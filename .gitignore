@@ -99,3 +99,7 @@ gooseselftest/
 /crates/goose-sdk/examples/uniffi/kotlin/build/
 
 live-in-desktop-design
+
+# WinAgent local cache and editor directories
+.winagent/
+.kilo/

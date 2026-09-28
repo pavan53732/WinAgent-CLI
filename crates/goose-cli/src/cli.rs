@@ -74,7 +74,7 @@ impl From<ServePlatform> for GoosePlatform {
 }
 
 #[derive(Parser)]
-#[command(name = "goose", author, version, display_name = "", about, long_about = None)]
+#[command(name = "winagent", author, version, display_name = "WinAgent CLI", about = "WinAgent - Autonomous Windows-First AI Agent CLI", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -809,12 +809,12 @@ enum RecipeCommand {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Configure goose settings
-    #[command(about = "Configure goose settings")]
+    /// Configure WinAgent settings
+    #[command(about = "Configure WinAgent settings")]
     Configure {},
 
-    /// Display goose configuration information
-    #[command(about = "Display goose information")]
+    /// Display WinAgent configuration information
+    #[command(about = "Display WinAgent information")]
     Info {
         /// Show verbose information including current configuration
         #[arg(short, long, help = "Show verbose information including config.yaml")]
@@ -823,7 +823,7 @@ enum Command {
         check: bool,
     },
 
-    #[command(about = "Check that your Goose setup is working")]
+    #[command(about = "Check that your WinAgent setup is working")]
     Doctor {},
 
     /// Manage system prompts and behaviors
@@ -1067,16 +1067,16 @@ enum Command {
 
     /// Terminal-integrated session (one session per terminal)
     #[command(
-        about = "Terminal-integrated goose session",
-        long_about = "Runs a goose session tied to your terminal window.\n\
+        about = "Terminal-integrated WinAgent session",
+        long_about = "Runs a WinAgent session tied to your terminal window.\n\
                       Each terminal maintains its own persistent session that resumes automatically.\n\n\
-                      Setup:\n  \
-                        eval \"$(goose term init zsh)\"  # zsh/bash\n  \
-                        let init = ($nu.cache-dir | path join \"goose-term-init.nu\"); ^goose term init nu | save --force $init; source $init\n\n\
+                      Setup (PowerShell):\n  \
+                        winagent term init powershell | Out-String | Invoke-Expression\n  \
+                        # Or add to $PROFILE for permanent integration\n\n\
                       Usage:\n  \
-                        goose term run \"list files in this directory\"\n  \
-                        @goose \"create a python script\"  # using alias\n  \
-                        @g \"quick question\"  # short alias"
+                        winagent term run \"list files in this directory\"\n  \
+                        @winagent \"create a modern CLI in Rust\"  # using alias\n  \
+                        @w \"quick question\"  # short alias"
     )]
     Term {
         #[command(subcommand)]

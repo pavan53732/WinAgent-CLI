@@ -92,15 +92,23 @@ fn unix_shell_command_args(command_line: &str) -> [&str; 2] {
 }
 
 /// Resolve the shell used to run Developer extension commands on Windows,
-/// respecting `GOOSE_SHELL`.
+/// respecting `WINAGENT_SHELL` or `GOOSE_SHELL`.
 ///
-/// Defaults to `cmd` when `GOOSE_SHELL` is unset. The invocation flags are
-/// chosen automatically from the executable name in `build_shell_command`,
-/// so callers only ever provide a bare executable path or name — see that
-/// function for the flag mapping.
+/// WinAgent defaults to `pwsh` (PowerShell 7+) if available in PATH, falling back
+/// to `powershell` (Windows PowerShell 5.1), and only falls back to `cmd` if
+/// neither PowerShell executable is present.
 #[cfg(windows)]
 fn windows_shell() -> String {
-    std::env::var("GOOSE_SHELL").unwrap_or_else(|_| "cmd".to_string())
+    if let Ok(shell) = std::env::var("WINAGENT_SHELL").or_else(|_| std::env::var("GOOSE_SHELL")) {
+        return shell;
+    }
+    if which::which("pwsh").is_ok() {
+        "pwsh".to_string()
+    } else if which::which("powershell").is_ok() {
+        "powershell".to_string()
+    } else {
+        "cmd".to_string()
+    }
 }
 
 /// Short, human-readable name of a shell path (the file stem), used both to
@@ -111,7 +119,7 @@ fn shell_basename(shell: &str) -> String {
     Path::new(shell)
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("cmd")
+        .unwrap_or("powershell")
         .to_lowercase()
 }
 
@@ -394,7 +402,7 @@ impl ShellTool {
             return Self::error_result(
                 "cmd.exe silently truncates commands at newlines — only the first line executes, \
                  with exit code 0. Use `&` to chain commands on one line \
-                 (e.g. `echo a & echo b`), or set GOOSE_SHELL=powershell.",
+                 (e.g. `echo a & echo b`), or use PowerShell (the default).",
                 None,
             );
         }
@@ -575,6 +583,11 @@ async fn run_command(
         .spawn()
         .map_err(|error| format!("Failed to spawn shell command: {}", error))?;
 
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        crate::subprocess::assign_to_global_job(pid);
+    }
+
     let child_stdout = child
         .stdout
         .take()
@@ -692,7 +705,15 @@ fn build_shell_command(
         let mut command = tokio::process::Command::new(&shell);
         match shell_stem.as_str() {
             "pwsh" | "powershell" => {
-                command.args(["-NoProfile", "-NonInteractive", "-Command", command_line]);
+                command.args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    command_line,
+                ]);
             }
             "cmd" => {
                 command.arg("/C").raw_arg(command_line);

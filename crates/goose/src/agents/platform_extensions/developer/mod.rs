@@ -9,7 +9,7 @@ use crate::agents::mcp_client::{Error, McpClientTrait};
 use crate::agents::ToolCallContext;
 use anyhow::Result;
 use async_trait::async_trait;
-use edit::{EditTools, FileEditParams, FileWriteParams};
+use edit::{EditTools, FileEditParams, FileReadParams, FileWriteParams};
 use image::{ImageReadParams, ImageTool};
 use indoc::indoc;
 use rmcp::model::{
@@ -42,7 +42,8 @@ pub struct DeveloperClient {
 fn developer_instructions() -> &'static str {
     if cfg!(windows) {
         indoc! {"
-            Use the developer extension to build software and operate a terminal.
+            Use the developer extension to build software and operate a native Windows terminal.
+            Commands execute by default in PowerShell (pwsh / Windows PowerShell) with UTF-8 encoding.
 
             Make sure to use the tools *efficiently* - reading all the content you need in as few
             iterations as possible and then making the requested edits or running commands. You are
@@ -50,9 +51,10 @@ fn developer_instructions() -> &'static str {
             cost the user money.
 
             For editing software, prefer the flow of using tree to understand the codebase structure
-            and file sizes. When you need to search, prefer findstr or Select-String (via shell).
-            Then use type or Get-Content to gather the context you need, always reading before
-            editing. Use write and edit to efficiently make changes. Test and verify as appropriate.
+            and file sizes. When you need to search, prefer ripgrep (rg) or Select-String (via shell).
+            Then use Get-Content or type to gather the context you need, always reading before
+            editing. Use write and edit to efficiently make changes.
+            For builds and testing on Windows, leverage dotnet, msbuild, cargo, gradle, or python as appropriate.
         "}
     } else {
         indoc! {"
@@ -107,6 +109,18 @@ impl DeveloperClient {
 
     pub(crate) fn get_tools() -> Vec<Tool> {
         vec![
+            Tool::new(
+                "read".to_string(),
+                "Read the contents of a file with optional line offset and limit.".to_string(),
+                Self::schema::<FileReadParams>(),
+            )
+            .annotate(ToolAnnotations::from_raw(
+                Some("Read".to_string()),
+                Some(true),
+                Some(false),
+                Some(false),
+                Some(false),
+            )),
             Tool::new(
                 "write".to_string(),
                 "Create a new file or overwrite an existing file. Creates parent directories if needed.".to_string(),
@@ -223,6 +237,12 @@ impl McpClientTrait for DeveloperClient {
                     .await),
                 Err(error) => Ok(ShellTool::error_result(&format!("Error: {error}"), None)),
             },
+            "read" => match Self::parse_args::<FileReadParams>(arguments) {
+                Ok(params) => Ok(self.edit_tools.file_read_with_cwd(params, working_dir)),
+                Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
+                    "Error: {error}"
+                ))])),
+            },
             "write" => match Self::parse_args::<FileWriteParams>(arguments) {
                 Ok(params) => Ok(self.edit_tools.file_write_with_cwd(params, working_dir)),
                 Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
@@ -276,7 +296,10 @@ mod tests {
             .map(|t| t.name.to_string())
             .collect();
 
-        assert_eq!(names, vec!["write", "edit", "shell", "tree", "read_image"]);
+        assert_eq!(
+            names,
+            vec!["read", "write", "edit", "shell", "tree", "read_image"]
+        );
     }
 
     #[test]

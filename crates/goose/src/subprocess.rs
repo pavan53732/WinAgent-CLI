@@ -8,6 +8,98 @@ use tokio::process::Command;
 #[cfg(windows)]
 const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
 
+#[cfg(windows)]
+pub struct Win32JobObject {
+    handle: winapi::um::winnt::HANDLE,
+}
+
+#[cfg(windows)]
+unsafe impl Send for Win32JobObject {}
+#[cfg(windows)]
+unsafe impl Sync for Win32JobObject {}
+
+#[cfg(windows)]
+impl Win32JobObject {
+    pub fn new() -> io::Result<Self> {
+        use std::ptr;
+        use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+        use winapi::um::jobapi2::{CreateJobObjectW, SetInformationJobObject};
+        use winapi::um::winnt::{
+            JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        unsafe {
+            let handle = CreateJobObjectW(ptr::null_mut(), ptr::null());
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            let res = SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &mut info as *mut _ as *mut _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+
+            if res == 0 {
+                let err = io::Error::last_os_error();
+                winapi::um::handleapi::CloseHandle(handle);
+                return Err(err);
+            }
+
+            Ok(Self { handle })
+        }
+    }
+
+    pub fn assign_pid(&self, pid: u32) -> io::Result<()> {
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::jobapi2::AssignProcessToJobObject;
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::winnt::{PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+
+        unsafe {
+            let proc_handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+            if proc_handle.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let success = AssignProcessToJobObject(self.handle, proc_handle);
+            CloseHandle(proc_handle);
+            if success == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Win32JobObject {
+    fn drop(&mut self) {
+        use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+        unsafe {
+            if !self.handle.is_null() && self.handle != INVALID_HANDLE_VALUE {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+static GLOBAL_JOB: std::sync::OnceLock<Option<Win32JobObject>> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+pub fn assign_to_global_job(pid: u32) {
+    let job = GLOBAL_JOB.get_or_init(|| Win32JobObject::new().ok());
+    if let Some(job) = job {
+        let _ = job.assign_pid(pid);
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn configure_parent_death_signal(command: &mut Command) {
     let parent_pid = unsafe { libc::getpid() };
@@ -137,8 +229,17 @@ pub async fn spawn_long_lived_mcp_subprocess(
     {
         let mut command = command;
         configure_subprocess(&mut command);
-        TokioChildProcess::builder(command)
+        let result = TokioChildProcess::builder(command)
             .stderr(std::process::Stdio::piped())
-            .spawn()
+            .spawn();
+
+        #[cfg(windows)]
+        if let Ok((ref child, _)) = result {
+            if let Some(pid) = child.id() {
+                assign_to_global_job(pid);
+            }
+        }
+
+        result
     }
 }

@@ -1,42 +1,41 @@
 ##############################################################################
-# goose CLI Install Script for Windows PowerShell
+# WinAgent CLI Install Script for Windows PowerShell
 #
-# This script downloads the latest stable 'goose' CLI binary from GitHub releases
+# This script downloads the latest stable 'winagent' CLI binary from GitHub releases
 # and installs it to your system.
 #
-# Supported OS: Windows
+# Supported OS: Windows 10/11
 # Supported Architectures: x86_64
 #
 # Usage:
-#   Invoke-WebRequest -Uri "https://github.com/aaif-goose/goose/releases/download/stable/download_cli.ps1" -OutFile "download_cli.ps1"; .\download_cli.ps1
+#   Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pavan53732/WinAgent-CLI/main/download_cli.ps1" -OutFile "download_cli.ps1"; .\download_cli.ps1
 #   Or simply: .\download_cli.ps1
 #
 # Environment variables:
-#   $env:GOOSE_BIN_DIR  - Directory to which goose will be installed (default: $env:USERPROFILE\.local\bin)
-#   $env:GOOSE_VERSION  - Optional: specific version to install (e.g., "v1.0.25"). Can be in the format vX.Y.Z, vX.Y.Z-suffix, or X.Y.Z
-#   $env:GOOSE_PROVIDER - Optional: provider for goose
-#   $env:GOOSE_MODEL    - Optional: model for goose
-#   $env:GOOSE_WINDOWS_VARIANT - Optional: Windows package variant to install ("standard" or "cuda")
-#   $env:CANARY         - Optional: if set to "true", downloads from canary release instead of stable
-#   $env:CONFIGURE      - Optional: if set to "false", disables running goose configure interactively
+#   $env:WINAGENT_BIN_DIR  - Directory to which WinAgent will be installed (default: $env:USERPROFILE\.local\bin)
+#   $env:WINAGENT_VERSION  - Optional: specific version to install (e.g., "v1.0.0")
+#   $env:WINAGENT_PROVIDER - Optional: provider for WinAgent
+#   $env:WINAGENT_MODEL    - Optional: model for WinAgent
+#   $env:CANARY            - Optional: if set to "true", downloads from canary release instead of stable
+#   $env:CONFIGURE         - Optional: if set to "false", disables running winagent configure interactively
 ##############################################################################
 
 # Set error action preference to stop on errors
 $ErrorActionPreference = "Stop"
 
 # --- 1) Variables ---
-$REPO = "aaif-goose/goose"
-$OUT_FILE = "goose.exe"
+$REPO = "pavan53732/WinAgent-CLI"
+$OUT_FILE = "winagent.exe"
 
 # Set default bin directory if not specified
-if (-not $env:GOOSE_BIN_DIR) {
-    $env:GOOSE_BIN_DIR = Join-Path $env:USERPROFILE ".local\bin"
+if (-not $env:WINAGENT_BIN_DIR) {
+    $env:WINAGENT_BIN_DIR = if ($env:GOOSE_BIN_DIR) { $env:GOOSE_BIN_DIR } else { Join-Path $env:USERPROFILE ".local\bin" }
 }
 
 # Determine release type
 $RELEASE = if ($env:CANARY -eq "true") { "true" } else { "false" }
 $CONFIGURE = if ($env:CONFIGURE -eq "false") { "false" } else { "true" }
-$WINDOWS_VARIANT = if ($env:GOOSE_WINDOWS_VARIANT) { $env:GOOSE_WINDOWS_VARIANT.ToLowerInvariant() } else { "standard" }
+$WINDOWS_VARIANT = if ($env:WINAGENT_WINDOWS_VARIANT) { $env:WINAGENT_WINDOWS_VARIANT.ToLowerInvariant() } elseif ($env:GOOSE_WINDOWS_VARIANT) { $env:GOOSE_WINDOWS_VARIANT.ToLowerInvariant() } else { "standard" }
 
 # Determine release tag
 if ($env:GOOSE_VERSION) {
@@ -70,7 +69,7 @@ if ($WINDOWS_VARIANT -ne "standard" -and $WINDOWS_VARIANT -ne "cuda") {
 }
 
 # --- 3) Build download URL ---
-$FILE = if ($WINDOWS_VARIANT -eq "cuda") { "goose-$ARCH-pc-windows-msvc-cuda.zip" } else { "goose-$ARCH-pc-windows-msvc.zip" }
+$FILE = if ($WINDOWS_VARIANT -eq "cuda") { "winagent-$ARCH-pc-windows-msvc-cuda.zip" } else { "winagent-$ARCH-pc-windows-msvc.zip" }
 $DOWNLOAD_URL = "https://github.com/$REPO/releases/download/$RELEASE_TAG/$FILE"
 
 Write-Host "Downloading $RELEASE_TAG release: $FILE..." -ForegroundColor Green

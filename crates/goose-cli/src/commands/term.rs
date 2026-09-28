@@ -138,13 +138,15 @@ $env.config.hooks.command_not_found = {|command_name|
 
 static POWERSHELL_CONFIG: ShellConfig = ShellConfig {
     script_template: r#"$env:AGENT_SESSION_ID = "{session_id}"
+function @winagent {{ & '{goose_bin}' term run @args }}
+function @w {{ & '{goose_bin}' term run @args }}
 function @goose {{ & '{goose_bin}' term run @args }}
 function @g {{ & '{goose_bin}' term run @args }}
 
 Set-PSReadLineKeyHandler -Chord Enter -ScriptBlock {{
     $line = $null
     [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$null)
-    if ($line -notmatch '^goose term' -and $line -notmatch '^(@goose|@g)($|\s)') {{
+    if ($line -notmatch '^(winagent|goose) term' -and $line -notmatch '^(@winagent|@w|@goose|@g)($|\s)') {{
         Start-Job -ScriptBlock {{ & '{goose_bin}' term log $using:line }} | Out-Null
     }}
     [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
