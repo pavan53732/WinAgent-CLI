@@ -585,7 +585,13 @@ async fn run_command(
 
     #[cfg(windows)]
     if let Some(pid) = child.id() {
-        crate::subprocess::assign_to_global_job(pid);
+        if let Err(e) = crate::subprocess::assign_to_global_job(pid) {
+            tracing::warn!(
+                "Failed to assign shell child process {} to Win32 Job Object: {}",
+                pid,
+                e
+            );
+        }
     }
 
     let child_stdout = child
@@ -705,15 +711,18 @@ fn build_shell_command(
         let mut command = tokio::process::Command::new(&shell);
         match shell_stem.as_str() {
             "pwsh" | "powershell" => {
-                command.args([
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    command_line,
-                ]);
+                let mut args = vec!["-NoLogo", "-NoProfile", "-NonInteractive"];
+                // WinAgent does not unconditionally bypass PowerShell execution policies.
+                // Any execution policy override must be an explicit policy capability
+                // configured via `WINAGENT_POWERSHELL_EXECUTION_POLICY`.
+                let policy = std::env::var("WINAGENT_POWERSHELL_EXECUTION_POLICY").ok();
+                if let Some(ref pol) = policy {
+                    args.push("-ExecutionPolicy");
+                    args.push(pol.as_str());
+                }
+                args.push("-Command");
+                args.push(command_line);
+                command.args(&args);
             }
             "cmd" => {
                 command.arg("/C").raw_arg(command_line);

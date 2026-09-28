@@ -19,8 +19,12 @@ pub use cli::Cli;
 pub use session::CliSession;
 
 /// Enable ANSI/VT escape sequence processing and UTF-8 encoding on Windows Console Host.
+///
+/// Sets console code pages to CP_UTF8 (65001) and applies ENABLE_VIRTUAL_TERMINAL_PROCESSING
+/// (0x0004) to stdout and stderr handles via SetConsoleMode.
+/// Returns (stdout_vt_enabled, stderr_vt_enabled).
 #[cfg(windows)]
-pub fn enable_windows_vt_processing() {
+pub fn enable_windows_vt_processing() -> (bool, bool) {
     let _ = console::Term::stdout().features().colors_supported();
     let _ = console::Term::stderr().features().colors_supported();
 
@@ -29,9 +33,36 @@ pub fn enable_windows_vt_processing() {
         extern "system" {
             fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
             fn SetConsoleCP(wCodePageID: u32) -> i32;
+            fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+            fn GetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, lpMode: *mut u32) -> i32;
+            fn SetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, dwMode: u32) -> i32;
         }
+
         let _ = SetConsoleOutputCP(65001);
         let _ = SetConsoleCP(65001);
+
+        const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32; // 0xFFFFFFF5
+        const STD_ERROR_HANDLE: u32 = (-12i32) as u32; // 0xFFFFFFF4
+        const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+        let enable_vt = |handle_id: u32| -> bool {
+            let handle = GetStdHandle(handle_id);
+            if handle.is_null() || handle == (-1isize as *mut std::ffi::c_void) {
+                return false;
+            }
+            let mut mode: u32 = 0;
+            if GetConsoleMode(handle, &mut mode) == 0 {
+                return false;
+            }
+            if (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0 {
+                return true;
+            }
+            SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+        };
+
+        let stdout_vt = enable_vt(STD_OUTPUT_HANDLE);
+        let stderr_vt = enable_vt(STD_ERROR_HANDLE);
+        (stdout_vt, stderr_vt)
     }
 }
 
@@ -69,4 +100,18 @@ pub fn run_main() -> anyhow::Result<()> {
     handle
         .join()
         .map_err(|_| anyhow::anyhow!("winagent-cli main thread panicked"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_vt_and_codepage_initialization() {
+        let (stdout_vt, stderr_vt) = enable_windows_vt_processing();
+        // Verifies the Win32 API calls execute without panicking.
+        // In interactive terminals, stdout_vt will be true; in non-interactive CI pipes it safely returns false.
+        let _ = (stdout_vt, stderr_vt);
+    }
 }

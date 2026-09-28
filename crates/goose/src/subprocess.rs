@@ -55,6 +55,26 @@ impl Win32JobObject {
         }
     }
 
+    /// Assign the current process to this Job Object.
+    ///
+    /// When the parent process is associated with the Job Object, Windows NT
+    /// automatically and atomically associates all future child processes with
+    /// the Job Object upon `CreateProcess` (unless explicitly broken away).
+    pub fn assign_current_process(&self) -> io::Result<()> {
+        use winapi::um::jobapi2::AssignProcessToJobObject;
+        use winapi::um::processthreadsapi::GetCurrentProcess;
+
+        unsafe {
+            let proc_handle = GetCurrentProcess();
+            let success = AssignProcessToJobObject(self.handle, proc_handle);
+            if success == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     pub fn assign_pid(&self, pid: u32) -> io::Result<()> {
         use winapi::um::handleapi::CloseHandle;
         use winapi::um::jobapi2::AssignProcessToJobObject;
@@ -90,14 +110,46 @@ impl Drop for Win32JobObject {
 }
 
 #[cfg(windows)]
-static GLOBAL_JOB: std::sync::OnceLock<Option<Win32JobObject>> = std::sync::OnceLock::new();
+static GLOBAL_JOB: std::sync::RwLock<Option<std::sync::Arc<Win32JobObject>>> =
+    std::sync::RwLock::new(None);
 
 #[cfg(windows)]
-pub fn assign_to_global_job(pid: u32) {
-    let job = GLOBAL_JOB.get_or_init(|| Win32JobObject::new().ok());
-    if let Some(job) = job {
-        let _ = job.assign_pid(pid);
+pub fn get_or_init_global_job() -> io::Result<std::sync::Arc<Win32JobObject>> {
+    {
+        let r = GLOBAL_JOB
+            .read()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        if let Some(ref job) = *r {
+            return Ok(job.clone());
+        }
     }
+    let mut w = GLOBAL_JOB
+        .write()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    if let Some(ref job) = *w {
+        return Ok(job.clone());
+    }
+    let job = std::sync::Arc::new(Win32JobObject::new()?);
+    // Assign current process so all descendant processes created by WinAgent
+    // automatically inherit the Job Object at spawn time without race condition.
+    if let Err(e) = job.assign_current_process() {
+        tracing::debug!(
+            "Parent WinAgent process not assigned to Win32 Job Object (already constrained or in container): {}",
+            e
+        );
+    } else {
+        tracing::debug!(
+            "Assigned parent WinAgent process to Win32 Job Object (all child processes inherit containment)"
+        );
+    }
+    *w = Some(job.clone());
+    Ok(job)
+}
+
+#[cfg(windows)]
+pub fn assign_to_global_job(pid: u32) -> io::Result<()> {
+    let job = get_or_init_global_job()?;
+    job.assign_pid(pid)
 }
 
 #[cfg(target_os = "linux")]
@@ -236,7 +288,13 @@ pub async fn spawn_long_lived_mcp_subprocess(
         #[cfg(windows)]
         if let Ok((ref child, _)) = result {
             if let Some(pid) = child.id() {
-                assign_to_global_job(pid);
+                if let Err(e) = assign_to_global_job(pid) {
+                    tracing::warn!(
+                        "Failed to assign MCP subprocess {} to Win32 Job Object: {}",
+                        pid,
+                        e
+                    );
+                }
             }
         }
 

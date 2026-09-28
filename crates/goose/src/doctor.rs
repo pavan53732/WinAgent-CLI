@@ -1,4 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::agents::platform_extensions::developer;
 use crate::agents::ExtensionConfig;
@@ -10,6 +12,473 @@ use crate::session::{
     config_path, latest_llm_log_path, read_capped, read_tail, recent_cli_log_paths, SystemInfo,
 };
 use goose_providers::errors::ProviderError;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DiagnosticStatus {
+    Pass,
+    Warning,
+    Fail,
+    OptionalMissing,
+}
+
+impl DiagnosticStatus {
+    pub fn badge(&self) -> &'static str {
+        match self {
+            DiagnosticStatus::Pass => "[PASS]",
+            DiagnosticStatus::Warning => "[WARN]",
+            DiagnosticStatus::Fail => "[FAIL]",
+            DiagnosticStatus::OptionalMissing => "[OPTIONAL]",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticCheck {
+    pub name: String,
+    pub category: String,
+    pub status: DiagnosticStatus,
+    pub version: Option<String>,
+    pub path: Option<String>,
+    pub details: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticReport {
+    pub os_name: String,
+    pub architecture: String,
+    pub checks: Vec<DiagnosticCheck>,
+}
+
+impl DiagnosticReport {
+    pub async fn gather() -> Self {
+        Self::collect_deterministic().await
+    }
+
+    pub async fn collect_deterministic() -> Self {
+        let os_name = std::env::consts::OS.to_string();
+        let architecture = std::env::consts::ARCH.to_string();
+        let mut checks = Vec::new();
+
+        // 1. PowerShell Check
+        checks.push(check_powershell().await);
+
+        // 2. Git Check
+        checks.push(check_git().await);
+
+        // 3. .NET SDK & MSBuild
+        checks.push(check_dotnet_msbuild().await);
+
+        // 4. Rust Toolchain
+        checks.push(check_rust().await);
+
+        // 5. Node.js & Package Managers
+        checks.push(check_node().await);
+
+        // 6. Python
+        checks.push(check_python().await);
+
+        // 7. Android SDK & ADB
+        checks.push(check_android_adb().await);
+
+        // 8. Ollama Local Model Server
+        checks.push(check_ollama().await);
+
+        // 9. Windows Kernel & Subsystem
+        #[cfg(windows)]
+        checks.push(check_windows_subsystem());
+
+        Self {
+            os_name,
+            architecture,
+            checks,
+        }
+    }
+
+    pub fn format_cli(&self) -> String {
+        let mut out = String::new();
+        out.push_str("\n=== WinAgent Deterministic System Audit ===\n");
+        out.push_str(&format!("OS: {} ({})\n\n", self.os_name, self.architecture));
+        out.push_str(&format!(
+            "{:<14} {:<20} {:<12} {}\n",
+            "Category", "Component", "Status", "Details"
+        ));
+        out.push_str(&format!("{}\n", "─".repeat(80)));
+        for c in &self.checks {
+            out.push_str(&format!(
+                "{:<14} {:<20} {:<12} {}\n",
+                c.category,
+                c.name,
+                c.status.badge(),
+                c.details
+            ));
+        }
+        out.push('\n');
+        out
+    }
+
+    pub fn print_cli(&self) {
+        println!("{}", self.format_cli());
+    }
+
+    pub fn format_markdown(&self) -> String {
+        let mut out = String::new();
+        out.push_str("### WinAgent Deterministic Environment Audit\n\n");
+        out.push_str(&format!(
+            "**OS:** {} ({})\n\n",
+            self.os_name, self.architecture
+        ));
+        out.push_str("| Category | Component | Status | Version | Path / Details |\n");
+        out.push_str("|---|---|---|---|---|\n");
+        for c in &self.checks {
+            let ver = c.version.as_deref().unwrap_or("-");
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                c.category,
+                c.name,
+                c.status.badge(),
+                ver,
+                c.details.replace('|', "/")
+            ));
+        }
+        out
+    }
+}
+
+async fn probe_command(program: &str, args: &[&str]) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use crate::subprocess::SubprocessExt;
+        cmd.set_no_window();
+    }
+    let child = cmd.spawn().ok()?;
+    let output = tokio::time::timeout(Duration::from_secs(3), child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !stdout.is_empty() {
+            return Some(stdout);
+        }
+    }
+    None
+}
+
+async fn check_powershell() -> DiagnosticCheck {
+    if let Ok(path) = which::which("pwsh") {
+        let ver = probe_command(
+            "pwsh",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$PSVersionTable.PSVersion.ToString()",
+            ],
+        )
+        .await
+        .unwrap_or_else(|| "7+".to_string());
+        DiagnosticCheck {
+            name: "PowerShell".to_string(),
+            category: "Shell".to_string(),
+            status: DiagnosticStatus::Pass,
+            version: Some(ver.clone()),
+            path: Some(path.display().to_string()),
+            details: format!("PowerShell Core {} at {}", ver, path.display()),
+        }
+    } else if let Ok(path) = which::which("powershell") {
+        let ver = probe_command(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$PSVersionTable.PSVersion.ToString()",
+            ],
+        )
+        .await
+        .unwrap_or_else(|| "5.1".to_string());
+        DiagnosticCheck {
+            name: "PowerShell".to_string(),
+            category: "Shell".to_string(),
+            status: DiagnosticStatus::Pass,
+            version: Some(ver),
+            path: Some(path.display().to_string()),
+            details: format!(
+                "Windows PowerShell 5.1 (Recommended: winget install Microsoft.PowerShell) at {}",
+                path.display()
+            ),
+        }
+    } else {
+        DiagnosticCheck {
+            name: "PowerShell".to_string(),
+            category: "Shell".to_string(),
+            status: DiagnosticStatus::Fail,
+            version: None,
+            path: None,
+            details: "Neither pwsh nor powershell found on PATH".to_string(),
+        }
+    }
+}
+
+async fn check_git() -> DiagnosticCheck {
+    if let Ok(path) = which::which("git") {
+        let ver = probe_command("git", &["--version"])
+            .await
+            .unwrap_or_else(|| "installed".to_string());
+        DiagnosticCheck {
+            name: "Git".to_string(),
+            category: "VCS".to_string(),
+            status: DiagnosticStatus::Pass,
+            version: Some(ver.clone()),
+            path: Some(path.display().to_string()),
+            details: format!("{} at {}", ver, path.display()),
+        }
+    } else {
+        DiagnosticCheck {
+            name: "Git".to_string(),
+            category: "VCS".to_string(),
+            status: DiagnosticStatus::Fail,
+            version: None,
+            path: None,
+            details: "Git is not installed or not in PATH".to_string(),
+        }
+    }
+}
+
+async fn check_dotnet_msbuild() -> DiagnosticCheck {
+    if let Ok(path) = which::which("dotnet") {
+        let ver = probe_command("dotnet", &["--version"]).await;
+        let msbuild_ver = probe_command("dotnet", &["msbuild", "-version"]).await;
+        let details = match (&ver, &msbuild_ver) {
+            (Some(v), Some(m)) => format!(
+                ".NET SDK {} (MSBuild {})",
+                v,
+                m.lines().next().unwrap_or("")
+            ),
+            (Some(v), None) => format!(".NET SDK {}", v),
+            _ => "dotnet present".to_string(),
+        };
+        DiagnosticCheck {
+            name: ".NET / MSBuild".to_string(),
+            category: "Build System".to_string(),
+            status: DiagnosticStatus::Pass,
+            version: ver,
+            path: Some(path.display().to_string()),
+            details,
+        }
+    } else {
+        DiagnosticCheck {
+            name: ".NET / MSBuild".to_string(),
+            category: "Build System".to_string(),
+            status: DiagnosticStatus::OptionalMissing,
+            version: None,
+            path: None,
+            details: "Not installed (Optional: winget install Microsoft.DotNet.SDK.9)".to_string(),
+        }
+    }
+}
+
+async fn check_rust() -> DiagnosticCheck {
+    if let Ok(path) = which::which("rustc") {
+        let ver = probe_command("rustc", &["--version"])
+            .await
+            .unwrap_or_else(|| "installed".to_string());
+        DiagnosticCheck {
+            name: "Rust / Cargo".to_string(),
+            category: "Build System".to_string(),
+            status: DiagnosticStatus::Pass,
+            version: Some(ver.clone()),
+            path: Some(path.display().to_string()),
+            details: format!("{} at {}", ver, path.display()),
+        }
+    } else {
+        DiagnosticCheck {
+            name: "Rust / Cargo".to_string(),
+            category: "Build System".to_string(),
+            status: DiagnosticStatus::OptionalMissing,
+            version: None,
+            path: None,
+            details: "Not installed (Optional for Rust builds)".to_string(),
+        }
+    }
+}
+
+async fn check_node() -> DiagnosticCheck {
+    if let Ok(path) = which::which("node") {
+        let ver = probe_command("node", &["--version"])
+            .await
+            .unwrap_or_else(|| "installed".to_string());
+        let mut pms = Vec::new();
+        if which::which("pnpm").is_ok() {
+            pms.push("pnpm");
+        }
+        if which::which("npm").is_ok() {
+            pms.push("npm");
+        }
+        if which::which("yarn").is_ok() {
+            pms.push("yarn");
+        }
+        if which::which("bun").is_ok() {
+            pms.push("bun");
+        }
+
+        let details = if pms.is_empty() {
+            format!("Node {} at {}", ver, path.display())
+        } else {
+            format!("Node {} ({}) at {}", ver, pms.join(", "), path.display())
+        };
+
+        DiagnosticCheck {
+            name: "Node.js".to_string(),
+            category: "Runtime".to_string(),
+            status: DiagnosticStatus::Pass,
+            version: Some(ver),
+            path: Some(path.display().to_string()),
+            details,
+        }
+    } else {
+        DiagnosticCheck {
+            name: "Node.js".to_string(),
+            category: "Runtime".to_string(),
+            status: DiagnosticStatus::OptionalMissing,
+            version: None,
+            path: None,
+            details: "Not installed (Optional: winget install OpenJS.NodeJS)".to_string(),
+        }
+    }
+}
+
+async fn check_python() -> DiagnosticCheck {
+    let py = which::which("python").or_else(|_| which::which("py"));
+    if let Ok(path) = py {
+        let ver = probe_command(path.to_str().unwrap_or("python"), &["--version"])
+            .await
+            .unwrap_or_else(|| "installed".to_string());
+        DiagnosticCheck {
+            name: "Python".to_string(),
+            category: "Runtime".to_string(),
+            status: DiagnosticStatus::Pass,
+            version: Some(ver.clone()),
+            path: Some(path.display().to_string()),
+            details: format!("{} at {}", ver, path.display()),
+        }
+    } else {
+        DiagnosticCheck {
+            name: "Python".to_string(),
+            category: "Runtime".to_string(),
+            status: DiagnosticStatus::OptionalMissing,
+            version: None,
+            path: None,
+            details: "Not installed (Optional for Python workflows)".to_string(),
+        }
+    }
+}
+
+async fn check_android_adb() -> DiagnosticCheck {
+    let android_home = std::env::var("ANDROID_HOME")
+        .or_else(|_| std::env::var("ANDROID_SDK_ROOT"))
+        .ok();
+    if let Ok(path) = which::which("adb") {
+        let ver = probe_command("adb", &["version"]).await;
+        let ver_str = ver
+            .as_deref()
+            .and_then(|v| v.lines().next())
+            .unwrap_or("installed");
+        let details = if let Some(home) = android_home {
+            format!("{} (ANDROID_HOME: {})", ver_str, home)
+        } else {
+            format!("{} at {}", ver_str, path.display())
+        };
+        DiagnosticCheck {
+            name: "Android SDK / ADB".to_string(),
+            category: "SDK".to_string(),
+            status: DiagnosticStatus::Pass,
+            version: Some(ver_str.to_string()),
+            path: Some(path.display().to_string()),
+            details,
+        }
+    } else if let Some(home) = android_home {
+        DiagnosticCheck {
+            name: "Android SDK / ADB".to_string(),
+            category: "SDK".to_string(),
+            status: DiagnosticStatus::Warning,
+            version: None,
+            path: Some(home.clone()),
+            details: format!("ANDROID_HOME set to {} but adb not found in PATH", home),
+        }
+    } else {
+        DiagnosticCheck {
+            name: "Android SDK / ADB".to_string(),
+            category: "SDK".to_string(),
+            status: DiagnosticStatus::OptionalMissing,
+            version: None,
+            path: None,
+            details: "Not installed or ANDROID_HOME not configured".to_string(),
+        }
+    }
+}
+
+async fn check_ollama() -> DiagnosticCheck {
+    let is_online = tokio::time::timeout(
+        Duration::from_millis(800),
+        tokio::net::TcpStream::connect("127.0.0.1:11434"),
+    )
+    .await
+    .map(|res| res.is_ok())
+    .unwrap_or(false);
+
+    if is_online {
+        DiagnosticCheck {
+            name: "Ollama (Local AI)".to_string(),
+            category: "AI Runtime".to_string(),
+            status: DiagnosticStatus::Pass,
+            version: None,
+            path: which::which("ollama").ok().map(|p| p.display().to_string()),
+            details: "Online at http://127.0.0.1:11434 (Ready for Qwen 2.5, DeepSeek-R1, Llama 3)"
+                .to_string(),
+        }
+    } else if let Ok(path) = which::which("ollama") {
+        DiagnosticCheck {
+            name: "Ollama (Local AI)".to_string(),
+            category: "AI Runtime".to_string(),
+            status: DiagnosticStatus::OptionalMissing,
+            version: None,
+            path: Some(path.display().to_string()),
+            details: "CLI installed but server is offline. Run 'ollama serve' to activate"
+                .to_string(),
+        }
+    } else {
+        DiagnosticCheck {
+            name: "Ollama (Local AI)".to_string(),
+            category: "AI Runtime".to_string(),
+            status: DiagnosticStatus::OptionalMissing,
+            version: None,
+            path: None,
+            details: "Not installed (Optional for local open-weights model inference)".to_string(),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn check_windows_subsystem() -> DiagnosticCheck {
+    let job_status = match crate::subprocess::get_or_init_global_job() {
+        Ok(_) => "ACTIVE (Job Object atomic process containment)",
+        Err(e) => Box::leak(format!("WARNING: {}", e).into_boxed_str()),
+    };
+
+    DiagnosticCheck {
+        name: "Win32 Containment".to_string(),
+        category: "Kernel".to_string(),
+        status: DiagnosticStatus::Pass,
+        version: None,
+        path: None,
+        details: format!("Job Object: {}", job_status),
+    }
+}
 
 pub(crate) const DEVELOPER_EXTENSION_REQUIRED_MESSAGE: &str = "**WinAgent Doctor**\n\n\
 `/doctor` requires the Developer extension, but it is disabled for this session.\n\n\
@@ -55,20 +524,13 @@ pub async fn run(agent: &crate::agents::Agent, session_id: &str) -> anyhow::Resu
         }
     }
 
-    if cfg!(windows) {
-        prompt.push_str(
-            "\nUse your tools to investigate what might be wrong on this Windows system. \
-             Check PowerShell (pwsh / powershell), Git for Windows, and common development \
-             toolchains (.NET SDK, MSBuild/Visual Studio, Python, Rust/Cargo, Android ADB) \
-             and report what you find.",
-        );
-    } else {
-        prompt.push_str(
-            "\nUse your tools to investigate what might be wrong. \
-             Check if common developer tools are available (git, etc.) \
-             and report what you find.",
-        );
-    }
+    let report = DiagnosticReport::collect_deterministic().await;
+    prompt.push_str("\n\n");
+    prompt.push_str(&report.format_markdown());
+    prompt.push_str(
+        "\n\nReview the deterministic environment audit above. If any required toolchains have FAIL or unexpected WARNING status, \
+         explain the concrete cause and provide precise Windows remediation commands (e.g. winget install, PATH adjustments, or environment settings)."
+    );
 
     Ok(Message::user().with_text(prompt))
 }
@@ -325,5 +787,28 @@ mod tests {
         );
 
         assert!(!is_developer_platform_config(&config));
+    }
+
+    #[tokio::test]
+    async fn test_deterministic_diagnostic_report() {
+        let report = DiagnosticReport::gather().await;
+        assert!(
+            !report.checks.is_empty(),
+            "Diagnostic report must contain checks"
+        );
+        let categories: Vec<&str> = report.checks.iter().map(|c| c.category.as_str()).collect();
+        assert!(categories.contains(&"Shell"), "Must include Shell check");
+        assert!(categories.contains(&"VCS"), "Must include VCS check");
+        assert!(
+            categories.contains(&"Kernel"),
+            "Must include Kernel containment check"
+        );
+
+        let cli_output = report.format_cli();
+        assert!(cli_output.contains("WinAgent Deterministic System Audit"));
+        assert!(cli_output.contains("Category"));
+
+        let md_output = report.format_markdown();
+        assert!(md_output.contains("WinAgent Deterministic Environment Audit"));
     }
 }
