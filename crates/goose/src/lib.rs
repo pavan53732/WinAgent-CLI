@@ -21,6 +21,7 @@ pub mod download_manager;
 pub mod elicitation;
 pub mod execution;
 pub mod gateway;
+pub mod git;
 pub mod goose_apps;
 pub mod hints;
 pub mod hooks;

@@ -62,6 +62,14 @@ static COMMANDS: &[CommandDef] = &[
         name: "status",
         description: "Show session status: model, provider, mode, and token usage",
     },
+    CommandDef {
+        name: "diff",
+        description: "View git diff of unstaged or staged changes (/diff or /diff --staged)",
+    },
+    CommandDef {
+        name: "commit",
+        description: "Stage and commit changes with a message (/commit <message>)",
+    },
 ];
 
 pub struct ParsedSlashCommand<'a> {
@@ -161,6 +169,8 @@ impl Agent {
             "status" => self.handle_status_command(session_id).await,
             "goal" => self.handle_goal_command(params_str).await,
             "grind" => self.handle_grind_command(params_str).await,
+            "diff" => self.handle_diff_command(params_str, session_id).await,
+            "commit" => self.handle_commit_command(params_str, session_id).await,
             _ => {
                 if let Some(message) = self
                     .handle_recipe_command(command, params_str, session_id)
@@ -313,6 +323,57 @@ impl Agent {
         );
 
         Ok(Some(user_only_assistant_text(text)))
+    }
+
+    async fn handle_diff_command(
+        &self,
+        params_str: &str,
+        session_id: &str,
+    ) -> Result<Option<Message>> {
+        let working_dir = self
+            .config
+            .session_manager
+            .get_session(session_id, false)
+            .await
+            .ok()
+            .map(|s| s.working_dir);
+        let repo_dir = working_dir.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let staged = params_str.contains("--staged");
+        let file_path = params_str.split_whitespace().find(|&p| p != "--staged");
+
+        let diff = crate::git::get_diff(&repo_dir, staged, file_path).await?;
+        Ok(Some(Message::assistant().with_text(diff)))
+    }
+
+    async fn handle_commit_command(
+        &self,
+        params_str: &str,
+        session_id: &str,
+    ) -> Result<Option<Message>> {
+        let working_dir = self
+            .config
+            .session_manager
+            .get_session(session_id, false)
+            .await
+            .ok()
+            .map(|s| s.working_dir);
+        let repo_dir = working_dir.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        let trimmed = params_str.trim();
+        if trimmed.is_empty() {
+            return Ok(Some(
+                Message::assistant().with_text("Usage: /commit <commit message>"),
+            ));
+        }
+
+        match crate::git::commit_changes(&repo_dir, trimmed, true).await {
+            Ok(output) => Ok(Some(
+                Message::assistant().with_text(format!("Commit created:\n{}", output)),
+            )),
+            Err(e) => Ok(Some(
+                Message::assistant().with_text(format!("Commit failed: {}", e)),
+            )),
+        }
     }
 
     async fn handle_prompts_command(

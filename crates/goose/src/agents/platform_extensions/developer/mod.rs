@@ -1,4 +1,5 @@
 pub mod edit;
+pub mod git_tool;
 pub mod image;
 pub mod shell;
 mod shell_output_streaming;
@@ -10,6 +11,7 @@ use crate::agents::ToolCallContext;
 use anyhow::Result;
 use async_trait::async_trait;
 use edit::{EditTools, FileEditParams, FileReadParams, FileWriteParams};
+use git_tool::{GitCommitParams, GitDiffParams, GitLogParams, GitStatusParams, GitTool};
 use image::{ImageReadParams, ImageTool};
 use indoc::indoc;
 use rmcp::model::{
@@ -37,12 +39,13 @@ pub struct DeveloperClient {
     edit_tools: Arc<EditTools>,
     tree_tool: Arc<TreeTool>,
     image_tool: Arc<ImageTool>,
+    git_tool: Arc<GitTool>,
 }
 
 fn developer_instructions() -> &'static str {
     if cfg!(windows) {
         indoc! {"
-            Use the developer extension to build software and operate a native Windows terminal.
+            Use the developer extension to build software, inspect repository state, and operate a native Windows terminal.
             Commands execute by default in PowerShell (pwsh / Windows PowerShell) with UTF-8 encoding.
 
             Make sure to use the tools *efficiently* - reading all the content you need in as few
@@ -50,6 +53,7 @@ fn developer_instructions() -> &'static str {
             responsible for managing your context window, and to minimize unnecessary turns which
             cost the user money.
 
+            For Git operations and evidence verification, prefer git_status, git_diff, and git_log.
             For editing software, prefer the flow of using tree to understand the codebase structure
             and file sizes. When you need to search, prefer ripgrep (rg) or Select-String (via shell).
             Then use Get-Content or type to gather the context you need, always reading before
@@ -58,13 +62,14 @@ fn developer_instructions() -> &'static str {
         "}
     } else {
         indoc! {"
-            Use the developer extension to build software and operate a terminal.
+            Use the developer extension to build software, inspect repository state, and operate a terminal.
 
             Make sure to use the tools *efficiently* - reading all the content you need in as few
             iterations as possible and then making the requested edits or running commands. You are
             responsible for managing your context window, and to minimize unnecessary turns which
             cost the user money.
 
+            For Git operations and evidence verification, prefer git_status, git_diff, and git_log.
             For editing software, prefer the flow of using tree to understand the codebase structure
             and file sizes. When you need to search, prefer rg which correctly respects gitignored
             content. Then use cat or sed to gather the context you need, always reading before editing.
@@ -87,6 +92,7 @@ impl DeveloperClient {
             edit_tools: Arc::new(EditTools::new()),
             tree_tool: Arc::new(TreeTool::new()),
             image_tool: Arc::new(ImageTool::new()),
+            git_tool: Arc::new(GitTool::new()),
         })
     }
 
@@ -195,6 +201,54 @@ impl DeveloperClient {
                 Some(true),
                 Some(true),
             )),
+            Tool::new(
+                "git_status".to_string(),
+                "Inspect Git repository status: current branch, HEAD commit, clean/dirty state, staged, unstaged, untracked, and conflicted files.".to_string(),
+                Self::schema::<GitStatusParams>(),
+            )
+            .annotate(ToolAnnotations::from_raw(
+                Some("Git Status".to_string()),
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+            )),
+            Tool::new(
+                "git_diff".to_string(),
+                "View unstaged or staged git diff, optionally filtered by a specific file path.".to_string(),
+                Self::schema::<GitDiffParams>(),
+            )
+            .annotate(ToolAnnotations::from_raw(
+                Some("Git Diff".to_string()),
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+            )),
+            Tool::new(
+                "git_commit".to_string(),
+                "Create a Git commit with a detailed message describing changes and evidence. Supports staging specific files or staging all changes.".to_string(),
+                Self::schema::<GitCommitParams>(),
+            )
+            .annotate(ToolAnnotations::from_raw(
+                Some("Git Commit".to_string()),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(false),
+            )),
+            Tool::new(
+                "git_log".to_string(),
+                "View the last N commits in the repository with commit hashes and titles.".to_string(),
+                Self::schema::<GitLogParams>(),
+            )
+            .annotate(ToolAnnotations::from_raw(
+                Some("Git Log".to_string()),
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+            )),
         ]
     }
 }
@@ -270,6 +324,30 @@ impl McpClientTrait for DeveloperClient {
                     "Error: {error}"
                 ))])),
             },
+            "git_status" => match Self::parse_args::<GitStatusParams>(arguments) {
+                Ok(params) => Ok(self.git_tool.status(params, working_dir).await),
+                Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
+                    "Error: {error}"
+                ))])),
+            },
+            "git_diff" => match Self::parse_args::<GitDiffParams>(arguments) {
+                Ok(params) => Ok(self.git_tool.diff(params, working_dir).await),
+                Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
+                    "Error: {error}"
+                ))])),
+            },
+            "git_commit" => match Self::parse_args::<GitCommitParams>(arguments) {
+                Ok(params) => Ok(self.git_tool.commit(params, working_dir).await),
+                Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
+                    "Error: {error}"
+                ))])),
+            },
+            "git_log" => match Self::parse_args::<GitLogParams>(arguments) {
+                Ok(params) => Ok(self.git_tool.log(params, working_dir).await),
+                Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
+                    "Error: {error}"
+                ))])),
+            },
             _ => Ok(CallToolResult::error(vec![visible_text(format!(
                 "Error: Unknown tool: {name}"
             ))])),
@@ -298,7 +376,18 @@ mod tests {
 
         assert_eq!(
             names,
-            vec!["read", "write", "edit", "shell", "tree", "read_image"]
+            vec![
+                "read",
+                "write",
+                "edit",
+                "shell",
+                "tree",
+                "read_image",
+                "git_status",
+                "git_diff",
+                "git_commit",
+                "git_log"
+            ]
         );
     }
 
