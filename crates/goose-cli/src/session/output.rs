@@ -1974,6 +1974,8 @@ mod tests {
         );
     }
 
+    // `shorten_path` only abbreviates a leading home directory on unix.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_home_directory_conversion() {
         // Save the current home dir

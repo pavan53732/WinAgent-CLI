@@ -573,6 +573,11 @@ async fn run_command(
 ) -> Result<ExecutionOutput, String> {
     let timeout_secs = Some(resolve_shell_timeout(timeout_secs));
 
+    // Fail closed: a shell child is the most direct path to system mutation, so
+    // it must not run while the containment boundary is unproven.
+    crate::subprocess::require_active_containment()
+        .map_err(|e| format!("Refusing to run shell command: {e}"))?;
+
     let mut command = build_shell_command(command_line, working_dir, login_path, session_id);
 
     command.stdout(Stdio::piped());
@@ -988,6 +993,8 @@ mod tests {
         }
     }
 
+    // Used only by platform-gated tests below.
+    #[allow(dead_code)]
     fn extract_shell_output(result: &CallToolResult) -> ShellOutput {
         let value = result
             .structured_content

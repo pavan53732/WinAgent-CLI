@@ -68,7 +68,7 @@ static COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "commit",
-        description: "Stage and commit changes with a message (/commit <message>)",
+        description: "Commit the files this session changed (/commit <message>), or the whole repository (/commit --all <message>)",
     },
 ];
 
@@ -359,19 +359,19 @@ impl Agent {
             .map(|s| s.working_dir);
         let repo_dir = working_dir.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-        let trimmed = params_str.trim();
-        if trimmed.is_empty() {
-            return Ok(Some(
-                Message::assistant().with_text("Usage: /commit <commit message>"),
-            ));
+        let stage_all = params_str.contains("--all");
+        let message = params_str.replace("--all", " ").trim().to_string();
+        if message.is_empty() {
+            return Ok(Some(Message::assistant().with_text(
+                "Usage: /commit <message> commits only the files this session changed.\n\
+                 /commit --all <message> commits the whole repository, including pre-existing work.",
+            )));
         }
 
-        match crate::git::commit_changes(&repo_dir, trimmed, true).await {
-            Ok(output) => Ok(Some(
-                Message::assistant().with_text(format!("Commit created:\n{}", output)),
-            )),
+        match crate::git::commit_for_session(&repo_dir, session_id, &message, stage_all).await {
+            Ok(output) => Ok(Some(Message::assistant().with_text(output))),
             Err(e) => Ok(Some(
-                Message::assistant().with_text(format!("Commit failed: {}", e)),
+                Message::assistant().with_text(format!("Commit failed: {e}")),
             )),
         }
     }

@@ -15,6 +15,7 @@ use crate::agents::types::RetryConfig;
 use crate::conversation::message::{Message, MessageErrorKind, SystemNotificationType};
 use crate::conversation::Conversation;
 use crate::session::Session;
+use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 pub(super) const NUDGED: &str = "nudged";
@@ -27,9 +28,17 @@ fn retry_error(error: &str) -> Message {
     )
 }
 
+fn stop_reason_of(decision: crate::repair::RepairDecision) -> Option<crate::repair::StopReason> {
+    match decision {
+        crate::repair::RepairDecision::Continue => None,
+        crate::repair::RepairDecision::Stop(reason) => Some(reason),
+    }
+}
+
 pub struct RetryOperation<'a> {
     goal: &'a Mutex<Option<String>>,
     grind: &'a Mutex<Option<String>>,
+    repair_budget: &'a Mutex<HashMap<String, crate::repair::RepairBudget>>,
     retry_timeout: Duration,
     on_failure_timeout: Duration,
 }
@@ -38,12 +47,14 @@ impl<'a> RetryOperation<'a> {
     pub fn new(
         goal: &'a Mutex<Option<String>>,
         grind: &'a Mutex<Option<String>>,
+        repair_budget: &'a Mutex<HashMap<String, crate::repair::RepairBudget>>,
         retry_timeout: Duration,
         on_failure_timeout: Duration,
     ) -> Self {
         Self {
             goal,
             grind,
+            repair_budget,
             retry_timeout,
             on_failure_timeout,
         }
@@ -230,6 +241,24 @@ impl Operation<Session, GooseEffect> for RetryOperation<'_> {
             return not_applicable();
         };
 
+        // The budget lock is taken in short scopes so the success checks and
+        // git inspection below do not serialise other sessions.
+        let begin_stop = {
+            let mut budgets = self.repair_budget.lock().await;
+            let budget = budgets
+                .entry(session.id.clone())
+                .or_insert_with(crate::repair::RepairBudget::default);
+            stop_reason_of(budget.begin_attempt())
+        };
+        if let Some(reason) = begin_stop {
+            let message = Message::assistant().with_error(
+                MessageErrorKind::Other,
+                format!("Repair loop stopped: {reason}."),
+            );
+            let message = emit.message(message).await;
+            return applied([message.into()]);
+        }
+
         let retry_timeout = retry_config
             .timeout_seconds
             .map(Duration::from_secs)
@@ -245,6 +274,44 @@ impl Operation<Session, GooseEffect> for RetryOperation<'_> {
         };
         if success {
             return not_applicable();
+        }
+
+        let mut report = match crate::git::session_baseline(&session.id, &session.working_dir)
+            .await
+            .ok()
+        {
+            Some(baseline) => {
+                match crate::repair::report_from_repository(&session.working_dir, &baseline).await {
+                    Ok(report) => report,
+                    Err(error) => {
+                        let message = emit.message(retry_error(&error.to_string())).await;
+                        return applied([message.into()]);
+                    }
+                }
+            }
+            None => crate::repair::AttemptReport::default(),
+        };
+        report.error = Some("recipe success checks failed".to_string());
+
+        let record_stop = {
+            let mut budgets = self.repair_budget.lock().await;
+            budgets
+                .get_mut(&session.id)
+                .map(|budget| stop_reason_of(budget.record(report)))
+                .unwrap_or(None)
+        };
+        if let Some(reason) = record_stop {
+            #[cfg(feature = "telemetry")]
+            crate::posthog::emit_error("repair_budget_stopped", &reason.to_string());
+            let message = Message::assistant().with_error(
+                MessageErrorKind::Other,
+                format!(
+                    "Repair loop stopped: {reason}.\nNo further repair attempts will be made: \
+                     continuing would repeat the same failure without new evidence."
+                ),
+            );
+            let message = emit.message(message).await;
+            return applied([message.into()]);
         }
 
         let attempts = self.attempts(messages);

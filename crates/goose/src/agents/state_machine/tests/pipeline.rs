@@ -98,6 +98,7 @@ pub(super) struct TestPipeline {
     stop_hook_block_cap: u32,
     goal: TokioMutex<Option<String>>,
     grind: TokioMutex<Option<String>>,
+    repair_budget: TokioMutex<std::collections::HashMap<String, crate::repair::RepairBudget>>,
     calculator: Arc<CalculatorExtension>,
     pub(super) session_id: String,
     working_dir: std::path::PathBuf,
@@ -160,6 +161,7 @@ impl TestPipeline {
             Arc::new(RetryOperation::new(
                 &self.goal,
                 &self.grind,
+                &self.repair_budget,
                 std::time::Duration::from_secs(1),
                 std::time::Duration::from_secs(1),
             )),
@@ -812,6 +814,7 @@ async fn build_test_pipeline(
         stop_hook_block_cap: 3,
         goal: TokioMutex::new(None),
         grind: TokioMutex::new(None),
+        repair_budget: TokioMutex::new(std::collections::HashMap::new()),
         calculator: calculator.clone(),
         session_id: session.id.clone(),
         working_dir: session.working_dir.clone(),

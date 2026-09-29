@@ -98,13 +98,20 @@ impl Operation<Session, GooseEffect> for ToolApprovalOperation<'_> {
                     &pending_requests,
                     &inspection_results,
                 )
-                .unwrap_or_else(
-                    || crate::permission::permission_judge::PermissionCheckResult {
+                // Match the legacy loop: with no permission inspector present,
+                // every request requires approval rather than executing
+                // unattended.
+                .unwrap_or_else(|| {
+                    let mut result = crate::permission::permission_judge::PermissionCheckResult {
                         approved: Vec::new(),
                         needs_approval: Vec::new(),
                         denied: Vec::new(),
-                    },
-                );
+                    };
+                    result
+                        .needs_approval
+                        .extend(pending_requests.iter().cloned());
+                    result
+                });
 
             for request in permission_check_result.denied {
                 effects.push(mark_executable(&request.id, false));

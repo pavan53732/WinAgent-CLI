@@ -33,12 +33,12 @@ use crate::agents::retry::{RetryManager, RetryResult};
 use crate::agents::state_machine::{
     has_unapplied_tool_confirmation_response, pending_tool_confirmations,
     persist_tool_confirmation_decision, run_goose, BangShellOperation, CompactionOperation,
-    DoctorOperation, Emitter, EntryHookOperation, ExitOnErrorOperation, GooseEffect,
-    GooseInferenceProvider, GooseInferenceRequestPreparer, InferenceRunner, MaxTurnsOperation,
-    Operation, ProjectOperation, RecipeOperation, RetryOperation, SkillOperation,
-    SlashCommandOperation, StateMachine, StatusOperation, SteerOperation, SteerQueue, Step,
-    StopHookOperation, ToolApprovalOperation, ToolExecutionOperation, ToolPairCompactionOperation,
-    UnknownToolOperation, MAX_TURNS_MESSAGE,
+    DoctorOperation, Emitter, EntryHookOperation, ExitOnErrorOperation, GitCommandOperation,
+    GooseEffect, GooseInferenceProvider, GooseInferenceRequestPreparer, InferenceRunner,
+    MaxTurnsOperation, Operation, ProjectOperation, RecipeOperation, RetryOperation,
+    SkillOperation, SlashCommandOperation, StateMachine, StatusOperation, SteerOperation,
+    SteerQueue, Step, StopHookOperation, ToolApprovalOperation, ToolExecutionOperation,
+    ToolPairCompactionOperation, UnknownToolOperation, MAX_TURNS_MESSAGE,
 };
 use crate::agents::types::{
     SessionConfig, SharedProvider, DEFAULT_ON_FAILURE_TIMEOUT_SECONDS,
@@ -56,6 +56,7 @@ use crate::conversation::message::{
     SystemNotificationType,
 };
 use crate::conversation::{debug_conversation_fix, fix_conversation, Conversation};
+use crate::permission::capability_inspector::CapabilityInspector;
 use crate::permission::permission_inspector::PermissionInspector;
 use crate::permission::permission_judge::PermissionCheckResult;
 use crate::permission::{Permission, PermissionConfirmation};
@@ -297,6 +298,7 @@ pub struct Agent {
     container: Mutex<Option<Container>>,
     pub(super) goal: Mutex<Option<String>>,
     pub(super) grind: Mutex<Option<String>>,
+    repair_budget: Mutex<HashMap<String, crate::repair::RepairBudget>>,
     steer_queues: Mutex<HashMap<String, SteerQueue>>,
 }
 
@@ -465,6 +467,7 @@ impl Agent {
             container: Mutex::new(None),
             goal: Mutex::new(None),
             grind: Mutex::new(None),
+            repair_budget: Mutex::new(HashMap::new()),
             steer_queues: Mutex::new(HashMap::new()),
         }
     }
@@ -772,6 +775,13 @@ impl Agent {
     ) -> ToolInspectionManager {
         let mut tool_inspection_manager = ToolInspectionManager::new();
 
+        // WinAgent capability policy: workspace containment and shell
+        // classification. Both agent loops run this inspector, so the policy is
+        // enforced identically in the legacy and state-machine paths.
+        tool_inspection_manager.add_inspector(Box::new(CapabilityInspector::new(Arc::clone(
+            &session_manager,
+        ))));
+
         // Add security inspector (highest priority - runs first)
         tool_inspection_manager.add_inspector(Box::new(SecurityInspector::new()));
         tool_inspection_manager.add_inspector(Box::new(EgressInspector::new()));
@@ -815,10 +825,17 @@ impl Agent {
         messages: &mut Conversation,
         session_config: &SessionConfig,
         initial_messages: &[Message],
+        working_dir: &std::path::Path,
     ) -> Result<RetryResult> {
         let result = self
             .retry_manager
-            .handle_retry_logic(messages, session_config, initial_messages)
+            .handle_retry_logic(
+                messages,
+                session_config,
+                initial_messages,
+                &self.repair_budget,
+                working_dir,
+            )
             .await?;
         if matches!(result, RetryResult::Retried) {
             if let Some(tool) = self.final_output_tool.lock().await.as_mut() {
@@ -1722,6 +1739,7 @@ impl Agent {
             Arc::new(RetryOperation::new(
                 &self.goal,
                 &self.grind,
+                &self.repair_budget,
                 std::time::Duration::from_secs(retry_timeout),
                 std::time::Duration::from_secs(on_failure_timeout),
             )),
@@ -1749,6 +1767,7 @@ impl Agent {
         );
         let mut command_handlers = operations.clone();
         command_handlers.push(status_operation);
+        command_handlers.push(Arc::new(GitCommandOperation::new()));
         let command_operation: Arc<dyn Operation<Session, GooseEffect> + '_> =
             Arc::new(SlashCommandOperation::new(command_handlers));
         let operations: Vec<_> =
@@ -3372,7 +3391,7 @@ impl Agent {
                             // on_failure, and max_retries. Only when no recipe
                             // retry is configured (Skipped) does the empty-turn
                             // fallback apply.
-                            match self.handle_retry_logic(&mut conversation, &session_config, &initial_messages).await {
+                            match self.handle_retry_logic(&mut conversation, &session_config, &initial_messages, &session.working_dir).await {
                                 Ok(RetryResult::Retried) => {
                                     info!("Retry logic triggered, restarting agent loop");
                                     messages_to_add = Conversation::default();

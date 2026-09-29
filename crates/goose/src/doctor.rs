@@ -250,35 +250,53 @@ async fn check_git() -> DiagnosticCheck {
 }
 
 async fn check_dotnet_msbuild() -> DiagnosticCheck {
-    if let Ok(path) = which::which("dotnet") {
-        let ver = probe_command("dotnet", &["--version"]).await;
-        let msbuild_ver = probe_command("dotnet", &["msbuild", "-version"]).await;
-        let details = match (&ver, &msbuild_ver) {
-            (Some(v), Some(m)) => format!(
-                ".NET SDK {} (MSBuild {})",
-                v,
-                m.lines().next().unwrap_or("")
-            ),
-            (Some(v), None) => format!(".NET SDK {}", v),
-            _ => "dotnet present".to_string(),
-        };
-        DiagnosticCheck {
-            name: ".NET / MSBuild".to_string(),
-            category: "Build System".to_string(),
-            status: DiagnosticStatus::Pass,
-            version: ver,
-            path: Some(path.display().to_string()),
-            details,
-        }
-    } else {
-        DiagnosticCheck {
+    let Ok(path) = which::which("dotnet") else {
+        return DiagnosticCheck {
             name: ".NET / MSBuild".to_string(),
             category: "Build System".to_string(),
             status: DiagnosticStatus::OptionalMissing,
             version: None,
             path: None,
             details: "Not installed (Optional: winget install Microsoft.DotNet.SDK.9)".to_string(),
+        };
+    };
+
+    // Discovery and functionality are separate facts: a `dotnet` on PATH that
+    // cannot report an SDK version, or cannot drive MSBuild, is not a working
+    // .NET environment.
+    let sdk_version = probe_command("dotnet", &["--version"]).await;
+    let msbuild = probe_command("dotnet", &["msbuild", "-version"]).await;
+
+    let (status, details) = match (&sdk_version, &msbuild) {
+        (Some(sdk), Some(msbuild)) => {
+            let msbuild_line = msbuild.lines().next().unwrap_or("").trim();
+            (
+                DiagnosticStatus::Pass,
+                format!("SDK discovered and MSBuild functional (SDK {sdk}, {msbuild_line})"),
+            )
         }
+        (Some(sdk), None) => (
+            DiagnosticStatus::Warning,
+            format!("SDK {sdk} discovered, but MSBuild did not respond"),
+        ),
+        (None, Some(_)) => (
+            DiagnosticStatus::Warning,
+            "MSBuild responded, but no .NET SDK version was reported".to_string(),
+        ),
+        (None, None) => (
+            DiagnosticStatus::Warning,
+            "dotnet is on PATH but reported neither an SDK version nor an MSBuild version"
+                .to_string(),
+        ),
+    };
+
+    DiagnosticCheck {
+        name: ".NET / MSBuild".to_string(),
+        category: "Build System".to_string(),
+        status,
+        version: sdk_version,
+        path: Some(path.display().to_string()),
+        details,
     }
 }
 
@@ -423,60 +441,103 @@ async fn check_android_adb() -> DiagnosticCheck {
 }
 
 async fn check_ollama() -> DiagnosticCheck {
-    let is_online = tokio::time::timeout(
-        Duration::from_millis(800),
-        tokio::net::TcpStream::connect("127.0.0.1:11434"),
+    // An open TCP port only proves something is listening. Ask the API whether
+    // the service is actually usable, and report model availability separately.
+    let api = tokio::time::timeout(
+        Duration::from_millis(1500),
+        reqwest::Client::new()
+            .get("http://127.0.0.1:11434/api/tags")
+            .send(),
     )
-    .await
-    .map(|res| res.is_ok())
-    .unwrap_or(false);
+    .await;
 
-    if is_online {
-        DiagnosticCheck {
-            name: "Ollama (Local AI)".to_string(),
-            category: "AI Runtime".to_string(),
-            status: DiagnosticStatus::Pass,
-            version: None,
-            path: which::which("ollama").ok().map(|p| p.display().to_string()),
-            details: "Online at http://127.0.0.1:11434 (Ready for Qwen 2.5, DeepSeek-R1, Llama 3)"
-                .to_string(),
+    let installed = which::which("ollama").ok();
+
+    let (status, details) = match api {
+        Ok(Ok(response)) if response.status().is_success() => {
+            let models = response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("models")
+                        .and_then(|models| models.as_array())
+                        .map(|models| models.len())
+                })
+                .unwrap_or(0);
+            (
+                DiagnosticStatus::Pass,
+                format!("API reachable at http://127.0.0.1:11434, {models} model(s) pulled"),
+            )
         }
-    } else if let Ok(path) = which::which("ollama") {
-        DiagnosticCheck {
-            name: "Ollama (Local AI)".to_string(),
-            category: "AI Runtime".to_string(),
-            status: DiagnosticStatus::OptionalMissing,
-            version: None,
-            path: Some(path.display().to_string()),
-            details: "CLI installed but server is offline. Run 'ollama serve' to activate"
-                .to_string(),
-        }
-    } else {
-        DiagnosticCheck {
-            name: "Ollama (Local AI)".to_string(),
-            category: "AI Runtime".to_string(),
-            status: DiagnosticStatus::OptionalMissing,
-            version: None,
-            path: None,
-            details: "Not installed (Optional for local open-weights model inference)".to_string(),
-        }
+        Ok(Ok(response)) => (
+            DiagnosticStatus::Warning,
+            format!(
+                "Endpoint answered with HTTP {}; the Ollama API is not serving",
+                response.status()
+            ),
+        ),
+        Ok(Err(e)) => (
+            DiagnosticStatus::Warning,
+            format!("TCP port is open but the HTTP API is not usable: {e}"),
+        ),
+        Err(_) => match &installed {
+            Some(_) => (
+                DiagnosticStatus::OptionalMissing,
+                "CLI installed but the server did not respond. Run 'ollama serve' to activate"
+                    .to_string(),
+            ),
+            None => (
+                DiagnosticStatus::OptionalMissing,
+                "Not installed (Optional for local open-weights model inference)".to_string(),
+            ),
+        },
+    };
+
+    DiagnosticCheck {
+        name: "Ollama (Local AI)".to_string(),
+        category: "AI Runtime".to_string(),
+        status,
+        version: None,
+        path: installed.map(|path| path.display().to_string()),
+        details,
     }
 }
 
 #[cfg(windows)]
 fn check_windows_subsystem() -> DiagnosticCheck {
-    let job_status = match crate::subprocess::get_or_init_global_job() {
-        Ok(_) => "ACTIVE (Job Object atomic process containment)",
-        Err(e) => Box::leak(format!("WARNING: {}", e).into_boxed_str()),
+    // Creating a Job Object, attaching the current process to it, and verifying
+    // that membership are three separate facts. Only the last one means child
+    // processes are actually contained.
+    let (status, details) = match crate::subprocess::containment_state() {
+        crate::subprocess::ContainmentState::Active => (
+            DiagnosticStatus::Pass,
+            "Job Object created, the current process was assigned, and IsProcessInJob confirmed \
+             membership: child processes are contained from creation"
+                .to_string(),
+        ),
+        crate::subprocess::ContainmentState::Uninitialized => (
+            DiagnosticStatus::Warning,
+            "Process containment has not been initialized; child processes are not contained"
+                .to_string(),
+        ),
+        crate::subprocess::ContainmentState::Failed(reason) => (
+            DiagnosticStatus::Fail,
+            format!(
+                "Process containment is NOT active: {reason}. Shell execution is refused while \
+                 containment is unavailable"
+            ),
+        ),
     };
 
     DiagnosticCheck {
         name: "Win32 Containment".to_string(),
         category: "Kernel".to_string(),
-        status: DiagnosticStatus::Pass,
+        status,
         version: None,
         path: None,
-        details: format!("Job Object: {}", job_status),
+        details,
     }
 }
 

@@ -3,7 +3,10 @@
 //! Exposes structured git status, diff inspection, commit generation, and commit logs
 //! as native first-class MCP tools for the agent.
 
-use crate::git::{commit_changes, get_diff, get_recent_log, get_repo_state, stage_files};
+use crate::git::{
+    commit_everything, commit_paths, get_diff, get_recent_log, get_repo_state, plan_commit,
+    reset_session_baseline, session_baseline,
+};
 use rmcp::model::{Annotations, CallToolResult, ContentBlock, TextContent};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,10 +41,15 @@ pub struct GitCommitParams {
     #[schemars(description = "The commit message describing the changes and evidence.")]
     pub message: String,
     #[schemars(
-        description = "If true, stage all modified and untracked files (git add -A) before committing. Default is false."
+        description = "Stage the entire repository and commit everything, including work that \
+                       predates this session. Only use this when the user explicitly asks for it; \
+                       it will consume unrelated staged changes."
     )]
     pub stage_all: Option<bool>,
-    #[schemars(description = "Optional specific files to stage before committing.")]
+    #[schemars(
+        description = "Optional explicit list of files to commit. When omitted, the files this \
+                       session changed are derived from the session baseline."
+    )]
     pub files: Option<Vec<String>>,
 }
 
@@ -137,22 +145,114 @@ impl GitTool {
         &self,
         params: GitCommitParams,
         working_dir: Option<&Path>,
+        session_id: &str,
     ) -> CallToolResult {
         let dir = self.resolve_dir(None, working_dir);
-        let stage_all = params.stage_all.unwrap_or(false);
 
         if let Some(files) = &params.files {
-            let file_refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
-            if let Err(e) = stage_files(&dir, &file_refs).await {
-                return CallToolResult::error(vec![visible_text(format!(
-                    "Failed staging files: {e}"
-                ))]);
+            let mut selected = Vec::new();
+            for file in files {
+                match self.validate_commit_path(file, working_dir, &dir) {
+                    Ok(path) => selected.push(path),
+                    Err(e) => {
+                        return CallToolResult::error(vec![visible_text(format!(
+                            "Refusing to commit {file}: {e}"
+                        ))])
+                    }
+                }
             }
+            return Self::finish_commit(commit_paths(&dir, &params.message, &selected).await, &dir);
         }
 
-        match commit_changes(&dir, &params.message, stage_all).await {
-            Ok(output) => {
-                CallToolResult::success(vec![visible_text(format!("Commit successful:\n{output}"))])
+        if params.stage_all.unwrap_or(false) {
+            let output = commit_everything(&dir, &params.message).await;
+            if output.is_ok() {
+                reset_session_baseline(session_id);
+            }
+            return Self::finish_commit(output, &dir);
+        }
+
+        let baseline = match session_baseline(session_id, &dir).await {
+            Ok(baseline) => baseline,
+            Err(e) => {
+                return CallToolResult::error(vec![visible_text(format!(
+                    "No session baseline is available for this repository: {e}. Pass an explicit \
+                     `files` list, or set stage_all only if the whole repository should be committed."
+                ))])
+            }
+        };
+
+        let plan = match plan_commit(&dir, &baseline).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                return CallToolResult::error(vec![visible_text(format!(
+                    "Failed to plan the commit: {e}"
+                ))])
+            }
+        };
+
+        if plan.is_empty() {
+            return CallToolResult::error(vec![visible_text(format!(
+                "Nothing to commit: no file changed since the session baseline.\n{}",
+                plan.describe()
+            ))]);
+        }
+
+        let output = commit_paths(&dir, &params.message, &plan.agent_owned).await;
+        if output.is_ok() {
+            reset_session_baseline(session_id);
+        }
+        Self::finish_commit_with_context(output, &dir, Some(plan.describe()))
+    }
+
+    /// A commit target must resolve inside the workspace, and inside the
+    /// repository the session is operating on.
+    fn validate_commit_path(
+        &self,
+        file: &str,
+        working_dir: Option<&Path>,
+        repo_dir: &Path,
+    ) -> Result<String, String> {
+        let candidate = Path::new(file);
+        if let Some(root) = working_dir {
+            crate::permission::path_security::resolve_and_validate_workspace_path(candidate, root)
+                .map_err(|e| e.to_string())?;
+        }
+        let resolved = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            repo_dir.join(candidate)
+        };
+        if !resolved.starts_with(repo_dir) {
+            return Err(format!(
+                "{} is outside the repository at {}",
+                resolved.display(),
+                repo_dir.display()
+            ));
+        }
+        Ok(resolved
+            .strip_prefix(repo_dir)
+            .unwrap_or(&resolved)
+            .to_string_lossy()
+            .replace('\\', "/"))
+    }
+
+    fn finish_commit(output: Result<String, anyhow::Error>, _dir: &Path) -> CallToolResult {
+        Self::finish_commit_with_context(output, _dir, None)
+    }
+
+    fn finish_commit_with_context(
+        output: Result<String, anyhow::Error>,
+        _dir: &Path,
+        context: Option<String>,
+    ) -> CallToolResult {
+        match output {
+            Ok(commit_output) => {
+                let mut message = format!("Commit successful:\n{commit_output}");
+                if let Some(context) = context {
+                    message.push_str(&format!("\n\n{context}"));
+                }
+                CallToolResult::success(vec![visible_text(message)])
             }
             Err(e) => {
                 CallToolResult::error(vec![visible_text(format!("Failed to create commit: {e}"))])
@@ -169,5 +269,11 @@ impl GitTool {
                 "Failed to retrieve git log: {e}"
             ))]),
         }
+    }
+}
+
+impl Default for GitTool {
+    fn default() -> Self {
+        Self::new()
     }
 }

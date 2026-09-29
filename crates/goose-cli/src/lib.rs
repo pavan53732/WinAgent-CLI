@@ -83,7 +83,18 @@ async fn run() -> anyhow::Result<()> {
 
 pub fn run_main() -> anyhow::Result<()> {
     #[cfg(windows)]
-    enable_windows_vt_processing();
+    {
+        enable_windows_vt_processing();
+        // Establish the process-containment boundary before any child is
+        // spawned. Once the current process is a member of the kill-on-close
+        // Job Object, descendants inherit containment at creation time.
+        if let Err(e) = goose::subprocess::initialize_windows_process_containment() {
+            eprintln!(
+                "Warning: Windows process containment is unavailable: {e}\n\
+                 Shell execution will be refused for this process."
+            );
+        }
+    }
 
     let handle = std::thread::Builder::new()
         .name("winagent-cli-main".to_string())

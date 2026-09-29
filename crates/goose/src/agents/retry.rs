@@ -109,16 +109,62 @@ impl RetryManager {
         messages: &mut Conversation,
         session_config: &SessionConfig,
         initial_messages: &[Message],
+        repair_budget: &tokio::sync::Mutex<
+            std::collections::HashMap<String, crate::repair::RepairBudget>,
+        >,
+        working_dir: &std::path::Path,
     ) -> Result<RetryResult> {
+        use crate::repair::RepairDecision;
+
         let Some(retry_config) = &session_config.retry_config else {
             return Ok(RetryResult::Skipped);
         };
+
+        // The budget lock is taken in short scopes so the success checks and git
+        // inspection below do not serialise other sessions.
+        let begin_stop = {
+            let mut budgets = repair_budget.lock().await;
+            let budget = budgets
+                .entry(session_config.id.clone())
+                .or_insert_with(crate::repair::RepairBudget::default);
+            match budget.begin_attempt() {
+                RepairDecision::Stop(reason) => Some(reason),
+                RepairDecision::Continue => None,
+            }
+        };
+        if let Some(reason) = begin_stop {
+            return Ok(budget_stopped(reason));
+        }
+
+        let baseline = crate::git::session_baseline(&session_config.id, working_dir)
+            .await
+            .ok();
 
         let success = execute_success_checks(&retry_config.checks, retry_config).await?;
 
         if success {
             info!("All success checks passed, no retry needed");
             return Ok(RetryResult::SuccessChecksPassed);
+        }
+
+        let mut report = match &baseline {
+            Some(baseline) => crate::repair::report_from_repository(working_dir, baseline).await?,
+            None => crate::repair::AttemptReport::default(),
+        };
+        report.error = Some("recipe success checks failed".to_string());
+
+        let record_stop = {
+            let mut budgets = repair_budget.lock().await;
+            budgets
+                .get_mut(&session_config.id)
+                .map(|budget| budget.record(report))
+                .and_then(|decision| match decision {
+                    RepairDecision::Stop(reason) => Some(reason),
+                    RepairDecision::Continue => None,
+                })
+        };
+        if let Some(reason) = record_stop {
+            return Ok(budget_stopped(reason));
         }
 
         let current_attempts = self.get_attempts().await;
@@ -151,6 +197,19 @@ impl RetryManager {
 
         Ok(RetryResult::Retried)
     }
+}
+
+/// Report a repair-budget stop through the normal retry-result channel so both
+/// agent loops surface it identically.
+fn budget_stopped(reason: crate::repair::StopReason) -> RetryResult {
+    warn!("Repair budget stopped the retry loop: {reason}");
+    #[cfg(feature = "telemetry")]
+    crate::posthog::emit_error("repair_budget_stopped", &reason.to_string());
+    RetryResult::MaxAttemptsReached(Message::assistant().with_text(format!(
+        "Repair loop stopped: {reason}.\n\
+         No further repair attempts will be made: continuing would repeat the same failure \
+         without new evidence."
+    )))
 }
 
 /// Get the configured timeout duration for retry operations

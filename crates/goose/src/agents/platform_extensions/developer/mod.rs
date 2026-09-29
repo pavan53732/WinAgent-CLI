@@ -337,7 +337,10 @@ impl McpClientTrait for DeveloperClient {
                 ))])),
             },
             "git_commit" => match Self::parse_args::<GitCommitParams>(arguments) {
-                Ok(params) => Ok(self.git_tool.commit(params, working_dir).await),
+                Ok(params) => Ok(self
+                    .git_tool
+                    .commit(params, working_dir, &ctx.session_id)
+                    .await),
                 Err(error) => Ok(CallToolResult::error(vec![visible_text(format!(
                     "Error: {error}"
                 ))])),
@@ -413,6 +416,8 @@ mod tests {
         }
     }
 
+    // Used only by platform-gated tests below.
+    #[allow(dead_code)]
     fn first_text(result: &CallToolResult) -> &str {
         match &result.content[0] {
             ContentBlock::Text(text) => &text.text,
